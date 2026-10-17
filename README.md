@@ -1,6 +1,6 @@
 # play-intro
 
-A hand-built **Play Framework 3 + Scala** sandbox. It's not meant to be a product. I'm using it to build a solid mental model of how Play works without any magic: compile-time DI with the cake pattern, play-json, MongoDB, and validation. It's also the starting point for a small, home-made **CQRS** framework.
+A hand-built **Play Framework 3 + Scala** sandbox. It's not meant to be a product. I'm using it to build a solid mental model of how Play works without any magic: compile-time DI with the cake pattern, play-json, MongoDB, and validation.
 
 | | |
 |---|---|
@@ -176,10 +176,3 @@ docker-compose.yml   MongoDB 8 (standalone)
 - [ ] `findBlog(id: BlogId)` via a `PathBindable[BlogId]` (UUID-validated, so a junk id → `400`). Put the binder in `controllers.binders` + `routesImport` to keep the domain free of `play.api.mvc`.
 - [ ] Unique index on `slug` → `409 Conflict`.
 - [ ] Tests (the generated `HomeControllerSpec` was removed when Guice was dropped).
-- [ ] **CQRS, the deep dive:**
-  1. Pure **decider**: `decide(state, cmd): Either[Rejection, Seq[Event]]` + `evolve(state, event): state` (the *reducer*), unit-tested with no IO
-  2. Command handler + **`InMemoryCommandBus`**
-  3. Mongo **snapshot store** ("snapshot of one": one document per aggregate + `version` for optimistic concurrency)
-  4. Set-based validation (unique slug)
-  5. `InMemoryEventBus` + `blog_cards` **projection** in the same Mongo
-  6. *Later:* single-node replica set → transactions → outbox → Kafka adapter on plain `kafka-clients`
