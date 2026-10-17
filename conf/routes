@@ -4,4 +4,5 @@
 # ~~~~
 
 GET     /                           controllers.HomeController.index()
-
+POST    /                           controllers.BlogController.createBlog()
+GET     /blog/:id                   controllers.BlogController.findBlog(id: String)
