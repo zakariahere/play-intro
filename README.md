@@ -26,7 +26,7 @@ Invoke-RestMethod -Method Post -Uri http://localhost:9000/ -ContentType 'applica
 | Method | Path | What it does |
 |---|---|---|
 | `GET` | `/` | Hello from `GreetingService` (reads `zak.greeting` from config) |
-| `POST` | `/` | Create a blog from a `BlogCreateRequest` → `201` + the blog JSON |
+| `POST` | `/` | Create a blog from a `BlogCreateRequest` → `201` + the blog JSON, or `400` with **every** validation error |
 | `GET` | `/blog/:id` | Find a blog → `200` or `404` |
 
 ---
@@ -119,10 +119,60 @@ The client can't send an `id`, because the request type doesn't have one. The se
 | Layer | Where | Tool | Fails with |
 |---|---|---|---|
 | **Syntactic** (is the JSON shaped right?) | the edge | `request.body.validate[BlogCreateRequest]` | `400` + `JsError.toJson(errors)` |
-| **Business rules** (does this make sense?) | controller → later the domain | cats `Validated` | `400` + `{"errors": [...]}` |
+| **Business rules** (does this make sense?) | controller → later the domain | cats `ValidatedNec[TodoError, A]` | `400` + `{"errors":[{"code","message"}]}` |
 | **Set-based** (e.g. unique slug) | the database | unique index *(to do)* | `409` |
 
-`Validated` (not `Either`) because it **accumulates** errors: check every rule and report all the failures at once.
+#### The "value or a reason why not" family
+
+They're all the same shape (a value, or why there isn't one), which is why they all have `map`, `fold` and `getOrElse`:
+
+| Type | Question it answers | Failure side |
+|---|---|---|
+| `Option[A]` | *Is there a value?* | `None` (no reason given) |
+| `Try[A]` | *Did this code throw?* | `Failure(exception)` |
+| `Either[E, A]` | *Did it work, and if not, why?* | `Left(error)`, **stops at the first error** |
+| `Validated[E, A]` | *Is everything valid? Tell me all the problems.* | `Invalid(errors)`, **collects every error** |
+| `JsResult[A]` | play-json's own hybrid | `JsError(errors per JSON path)` |
+
+**Either or Validated?** Ask whether step 2 needs the result of step 1. If it does, it's a chain: `Either` / `for`. If the checks are independent (slug OK? description OK?), use `Validated` and report everything at once. `createBlog` uses both: `validate` → `validateBlog` → `save` is a chain, and the rules inside `validateBlog` are independent.
+
+#### Accumulating validation with `ValidatedNec`
+
+```scala
+type ValidationResult[A] = ValidatedNec[TodoError, A]      // = Validated[NonEmptyChain[TodoError], A]
+
+sealed trait TodoError { def message: String }             // typed errors, not raw strings
+object TodoError {
+  case object DescriptionBlank extends TodoError { val message = "Description is not on point." }
+  case object SlugBlank        extends TodoError { val message = "Slug is not on point." }
+}
+
+private def validateSlug(slug: String): ValidationResult[String] =
+  if (slug.trim.isBlank) SlugBlank.invalidNec else slug.validNec
+
+private def validateBlog(payload: BlogCreateRequest): ValidationResult[BlogCreateRequest] =
+  (validateSlug(payload.slug), validateDescription(payload.description)).mapN(BlogCreateRequest(_, _))
+```
+
+- **`Nec` = `NonEmptyChain`.** An `Invalid` always holds **at least one** error, and the type guarantees it. It's a `Chain` and not a `List` because combining results *appends* error collections, which is O(1) for `Chain` and O(n) for `List`.
+- **`mapN`:** if every input is `Valid`, it calls your function with all the values. If *any* is `Invalid`, it skips the function and **combines all the errors**.
+- **The HTTP side** turns the errors into JSON. A `case object`'s `toString` is its name, so you get a machine-readable `code` for free:
+
+  ```scala
+  BadRequest(Json.obj("errors" -> errors.toChain.toList.map(e => Json.obj("code" -> e.toString, "message" -> e.message))))
+  ```
+
+  ```json
+  {"errors":[{"code":"SlugBlank","message":"Slug is not on point."},{"code":"DescriptionBlank","message":"Description is not on point."}]}
+  ```
+
+#### Traps I hit on the way
+
+- **`mapN(payload)` → `found BlogCreateRequest, required (String, String) => BlogCreateRequest`.** `mapN` needs a *function* of N arguments, not a value. Read a type mismatch as "found X, required Y": if Y is a function type, you need something you can call.
+- **`mapN(BlogCreateRequest)` doesn't compile either.** Once you write your own `object BlogCreateRequest`, the companion no longer works as a `(String, String) => BlogCreateRequest` function. Use `BlogCreateRequest(_, _)` or `BlogCreateRequest.apply`.
+- **`_ => Json.obj(_)` is two separate lambdas.** Each `_` is a new parameter of the smallest surrounding expression, so this built a `List` of *functions*. As soon as you need the value inside a nested call, name it: `e => Json.obj("message" -> e.message)`.
+- **Cats syntax comes from imports.** `.mapN`, `.validNec` and `.toList` are added by implicit conversions. If you (or the IDE's "optimize imports") pull in only some of them, the others silently vanish: `value toList is not a member of NonEmptyChain`. `import cats.syntax.all._` brings everything in; `errors.toChain.toList` needs no syntax import at all.
+- **`case x =>` matches everything.** A lowercase name in a pattern is a *new variable*, not a comparison. The compiler says "patterns after a variable pattern cannot match / unreachable code".
 
 ### 7. `Action[A]`: `A` is the request *body* type
 
@@ -172,7 +222,8 @@ docker-compose.yml   MongoDB 8 (standalone)
 
 ## Next steps
 
-- [ ] `validateBlog`: the `case description =>` pattern matches *everything* (the compiler warns "unreachable code"). Replace it with a real check, e.g. `Validated.cond(...)`, and switch to `ValidatedNel`.
+- [x] `validateBlog` with accumulating `ValidatedNec[TodoError, _]` + `mapN`.
+- [ ] Move `TodoError` and the validators from `BlogController` into `model` (they're domain rules). The controller should only translate errors into HTTP.
 - [ ] `findBlog(id: BlogId)` via a `PathBindable[BlogId]` (UUID-validated, so a junk id → `400`). Put the binder in `controllers.binders` + `routesImport` to keep the domain free of `play.api.mvc`.
 - [ ] Unique index on `slug` → `409 Conflict`.
 - [ ] Tests (the generated `HomeControllerSpec` was removed when Guice was dropped).
